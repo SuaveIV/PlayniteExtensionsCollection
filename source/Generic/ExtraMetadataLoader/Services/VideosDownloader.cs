@@ -96,47 +96,52 @@ namespace ExtraMetadataLoader.Services
 
 
 
+            var success = true;
+
             if (downloadVideo)
             {
                 var movie = steamAppDetails.data.Movies[0];
-
                 Uri videoManifestUrl =
-                    movie.DashH264 ??
-                    movie.HlsH264 ??
-                    null;
+                    movie?.DashH264 ??
+                    movie?.HlsH264;
 
                 if (videoManifestUrl is null)
                 {
-                    return false;
+                    logger.Debug($"Steam trailer manifest not found for game {game.Name}");
+                    success = false;
                 }
-
-                int videoStreamIndex = settings.VideoSteamDownloadHdQuality
-                    ? 0  // 1080p
-                    : 1; // 720p
-
-                var ffmpegArgs =
-                    "-y -loglevel error " +
-                    "-analyzeduration 0 -probesize 32k " +
-                    $"-i \"{videoManifestUrl}\" " +
-                    $"-map 0:v:{videoStreamIndex}? " +
-                    "-map 0:a:0? " +
-                    "-c copy -movflags +faststart " +
-                    $"\"{tempDownloadPath}\"";
-
-                var ffmpegResult = ProcessStarter.StartProcessWait(ffmpegPath, ffmpegArgs, Path.GetDirectoryName(ffmpegPath), true, out var stdOut, out var stdErr);
-                if (ffmpegResult != 0)
+                else
                 {
-                    logger.Error($"Failed to download video in ffmpeg: {videoPath}, {ffmpegResult}, {stdErr}");
-                    playniteApi.Notifications.Add(new NotificationMessage(
-                        Guid.NewGuid().ToString(),
-                        string.Format(ResourceProvider.GetString("LOCExtra_Metadata_Loader_NotificationErrorFfmpegProcessingFail"), videoPath, ffmpegResult, stdErr),
-                        NotificationType.Error)
-                    );
+                    int videoStreamIndex = settings.VideoSteamDownloadHdQuality
+                        ? 0  // 1080p
+                        : 1; // 720p
 
-                    return false;
+                    var ffmpegArgs =
+                        "-y -loglevel error " +
+                        "-analyzeduration 0 -probesize 32k " +
+                        $"-i \"{videoManifestUrl}\" " +
+                        $"-map 0:v:{videoStreamIndex}? " +
+                        "-map 0:a:0? " +
+                        "-c copy -movflags +faststart " +
+                        $"\"{tempDownloadPath}\"";
+
+                    var ffmpegResult = ProcessStarter.StartProcessWait(ffmpegPath, ffmpegArgs, Path.GetDirectoryName(ffmpegPath), true, out var stdOut, out var stdErr);
+                    if (ffmpegResult != 0)
+                    {
+                        logger.Error($"Failed to download video in ffmpeg: {videoPath}, {ffmpegResult}, {stdErr}");
+                        playniteApi.Notifications.Add(new NotificationMessage(
+                            Guid.NewGuid().ToString(),
+                            string.Format(ResourceProvider.GetString("LOCExtra_Metadata_Loader_NotificationErrorFfmpegProcessingFail"), videoPath, ffmpegResult, stdErr),
+                            NotificationType.Error)
+                        );
+
+                        success = false;
+                    }
+                    else
+                    {
+                        ProcessVideo(tempDownloadPath, videoPath, false, true);
+                    }
                 }
-
-                ProcessVideo(tempDownloadPath, videoPath, false, true);
             }
             if (downloadVideoMicro)
             {
@@ -162,7 +167,7 @@ namespace ExtraMetadataLoader.Services
                 }
             }
 
-            return true;
+            return success;
         }
 
         /// <summary>
