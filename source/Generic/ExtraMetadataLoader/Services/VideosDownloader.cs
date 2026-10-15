@@ -7,6 +7,7 @@ using PlayniteUtilitiesCommon;
 using PluginsCommon;
 using FlowHttp;
 using SteamCommon;
+using SteamCommon.Models;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -24,7 +25,14 @@ namespace ExtraMetadataLoader.Services
         private static readonly ILogger logger = LogManager.GetLogger();
         private readonly ExtraMetadataLoaderSettings settings;
         private readonly ExtraMetadataHelper extraMetadataHelper;
-        private const string steamMicrotrailerUrlTemplate = @"https://steamcdn-a.akamaihd.net/steam/apps/{0}/microtrailer.mp4";
+        private const string _steamCdnFileUrlTemplate = @"{0}/steam/apps/{1}/{2}";
+        private static readonly string[] _steamMicrotrailerCdnHosts = new[]
+        {
+            "https://cdn.akamai.steamstatic.com",
+            "https://cdn.fastly.steamstatic.com",
+            "https://steamcdn-a.akamaihd.net"
+        };
+        private static readonly string[] _steamMicrotrailerFileNames = new[] { "microtrailer.mp4", "microtrailer.webm" };
         private readonly string tempDownloadPath = Path.Combine(Path.GetTempPath(), "VideoTemp.mp4");
 
         public VideosDownloader(IPlayniteAPI playniteApi, ExtraMetadataLoaderSettings settings, ExtraMetadataHelper extraMetadataHelper)
@@ -132,19 +140,108 @@ namespace ExtraMetadataLoader.Services
             }
             if (downloadVideoMicro)
             {
-                var videoUrl = string.Format(steamMicrotrailerUrlTemplate, steamAppDetails.data.Movies[0].Id);
-                var downloadFileResult = HttpRequestFactory
-                    .GetHttpFileRequest()
-                    .WithUrl(videoUrl.ToString())
-                    .WithDownloadTo(tempDownloadPath)
-                    .DownloadFile(cancelToken);
-                if (downloadFileResult.IsSuccess)
+                var microtrailerUrl = GetSteamMicrotrailerUrl(steamAppDetails.data.Movies, cancelToken);
+                if (microtrailerUrl.IsNullOrEmpty())
                 {
-                    ProcessVideo(tempDownloadPath, videoMicroPath, false, true);
+                    logger.Debug($"Steam microtrailer url not found for game {game.Name}");
+                }
+                else
+                {
+                    // The temporary file must keep the extension of the downloaded file so that
+                    // ProcessVideo detects that a conversion is needed for webm files
+                    var microtrailerTempPath = Path.Combine(Path.GetTempPath(), $"VideoMicroTemp{Path.GetExtension(microtrailerUrl)}");
+                    var downloadFileResult = HttpRequestFactory
+                        .GetHttpFileRequest()
+                        .WithUrl(microtrailerUrl)
+                        .WithDownloadTo(microtrailerTempPath)
+                        .DownloadFile(cancelToken);
+                    if (downloadFileResult.IsSuccess)
+                    {
+                        ProcessVideo(microtrailerTempPath, videoMicroPath, false, true);
+                    }
                 }
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Obtains the url of the microtrailer of a game. Steam doesn't return the microtrailer url
+        /// in the appdetails api and it's not generated for every game, so it has to be constructed.
+        /// For trailers with streamable manifests the microtrailer is stored in the same directory as
+        /// the trailer manifest, so the url is obtained by replacing the manifest file name. Older
+        /// trailers, which don't have manifests, only have the microtrailer in the legacy per movie id
+        /// location, which is checked as a fallback.
+        /// </summary>
+        private string GetSteamMicrotrailerUrl(IEnumerable<SteamAppDetails.AppDetails.Movie> movies, CancellationToken cancelToken)
+        {
+            foreach (var movie in movies)
+            {
+                var manifestUrl = (movie?.DashH264 ?? movie?.DashAv1 ?? movie?.HlsH264)?.ToString();
+                if (manifestUrl.IsNullOrEmpty())
+                {
+                    continue;
+                }
+
+                var lastSeparatorIndex = manifestUrl.LastIndexOf('/');
+                if (lastSeparatorIndex <= 0)
+                {
+                    continue;
+                }
+
+                var trailerDirectoryUrl = manifestUrl.Substring(0, lastSeparatorIndex);
+                foreach (var fileName in _steamMicrotrailerFileNames)
+                {
+                    var microtrailerUrl = $"{trailerDirectoryUrl}/{fileName}";
+                    if (IsUrlAvailable(microtrailerUrl, cancelToken))
+                    {
+                        logger.Debug($"Steam microtrailer found for movie {movie.Id}: {microtrailerUrl}");
+                        return microtrailerUrl;
+                    }
+                }
+            }
+
+            foreach (var movie in movies)
+            {
+                if (movie is null || movie.Id == 0)
+                {
+                    continue;
+                }
+
+                foreach (var fileName in _steamMicrotrailerFileNames)
+                {
+                    foreach (var cdnHost in _steamMicrotrailerCdnHosts)
+                    {
+                        var microtrailerUrl = string.Format(_steamCdnFileUrlTemplate, cdnHost, movie.Id, fileName);
+                        if (IsUrlAvailable(microtrailerUrl, cancelToken))
+                        {
+                            logger.Debug($"Steam microtrailer found for movie {movie.Id} in legacy location: {microtrailerUrl}");
+                            return microtrailerUrl;
+                        }
+                    }
+                }
+            }
+
+            logger.Debug("Steam microtrailer not found for any movie of the game");
+            return null;
+        }
+
+        private bool IsUrlAvailable(string url, CancellationToken cancelToken)
+        {
+            try
+            {
+                return HttpRequestFactory
+                    .GetHttpRequest()
+                    .WithUrl(url)
+                    .WithHeadHttpMethod()
+                    .DownloadString(cancelToken)
+                    .IsSuccess;
+            }
+            catch (Exception e)
+            {
+                logger.Error(e, $"Error checking availability of url {url}");
+                return false;
+            }
         }
 
         private bool ProcessVideo(string videoPath, string destinationPath, bool copyOnly, bool deleteSource, string args = null)
